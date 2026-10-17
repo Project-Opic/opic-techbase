@@ -124,11 +124,17 @@ export default function AIModelConfigPage() {
     if (!editing) return
     setUpstreamLoading(true)
     try {
-      const q = new URLSearchParams()
-      if (!isNew && editing.id) q.set('id', String(editing.id))
-      if (editing.base_url) q.set('base_url', editing.base_url)
-      // 编辑中密钥未回显：仅已保存账号可用 id 取存档密钥；表单态新账号需先保存
-      const r = await http.get<{ models: string[] | null; error?: string }>(`/api/admin/ai/upstream-models?${q}`)
+      // 已保存账号：GET ?id= 走存档端点与密钥（前端不回显密钥）；
+      // 表单态：POST 体提交 base_url/api_key（密钥不进 URL，避免落访问日志/代理记录）
+      const r =
+        !isNew && editing.id
+          ? await http.get<{ models: string[] | null; error?: string }>(
+              `/api/admin/ai/upstream-models?id=${editing.id}`,
+            )
+          : await http.post<{ models: string[] | null; error?: string }>('/api/admin/ai/upstream-models', {
+              base_url: editing.base_url || '',
+              api_key: editing.api_key || '',
+            })
       if (r.models?.length) {
         setEditing({ ...editing, models: r.models.join(','), default_model: editing.default_model || r.models[0] })
         message.success(`获取到 ${r.models.length} 个可用模型`)

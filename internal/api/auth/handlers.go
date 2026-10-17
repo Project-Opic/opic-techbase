@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,13 +16,29 @@ import (
 )
 
 // Login 本地账号登录(local 模式)。须先通过图形验证码(安控加强)。
+// 登录按来源与账号双维限速退避,失败落审计(LOGIN_FAIL),成功登录清零账号维度失败计数。
 func Login(c *gin.Context) {
+	if ok, retry := loginSourceLimit.blocked(sourceKey(c)); ok {
+		service.WriteAudit(nil, 0, "", "LOGIN_FAIL", "来源限速拦截")
+		c.JSON(200, errcode.New(errcode.ErrLogin, waitMsg(retry), nil))
+		return
+	}
 	body := common.BindJSON(c)
-	if !VerifyCaptcha(common.Trim(body["captcha_id"]), common.Trim(body["captcha_code"])) {
+	username := common.Trim(body["username"])
+	if ok, retry := loginAccountLimit.blocked(strings.ToLower(username)); ok {
+		service.WriteAudit(nil, 0, username, "LOGIN_FAIL", "账号失败退避中")
+		c.JSON(200, errcode.New(errcode.ErrLogin, waitMsg(retry), nil))
+		return
+	}
+	if !VerifyCaptcha(c, common.Trim(body["captcha_id"]), common.Trim(body["captcha_code"])) {
+		loginSourceLimit.take(sourceKey(c))
+		if username != "" {
+			loginAccountLimit.take(strings.ToLower(username))
+		}
+		service.WriteAudit(nil, 0, username, "LOGIN_FAIL", "验证码错误或已过期")
 		c.JSON(200, errcode.New(errcode.ErrLogin, "验证码错误或已过期", nil))
 		return
 	}
-	username := common.Trim(body["username"])
 	password := common.Trim(body["password"])
 	if username == "" || password == "" {
 		c.JSON(200, errcode.New(errcode.ErrLogin, "请输入用户名和密码", nil))
@@ -29,10 +46,13 @@ func Login(c *gin.Context) {
 	}
 	user, errMsg := service.Login(username, password)
 	if errMsg != "" {
+		loginSourceLimit.take(sourceKey(c))
+		loginAccountLimit.take(strings.ToLower(username))
+		service.WriteAudit(nil, 0, username, "LOGIN_FAIL", errMsg)
 		c.JSON(200, errcode.New(errcode.ErrLogin, errMsg, nil))
 		return
 	}
-	tk, err := auth.IssueLocalToken(service.Int(user["id"]), service.Str(user["username"]))
+	tk, err := auth.IssueLocalToken(service.Int(user["id"]), service.Str(user["username"]), service.Int(user["session_epoch"]))
 	if err != nil {
 		common.FailJSON(c, err)
 		return
@@ -43,6 +63,8 @@ func Login(c *gin.Context) {
 		return
 	}
 	payload["token"] = tk
+	loginSourceLimit.reset(sourceKey(c))
+	loginAccountLimit.reset(strings.ToLower(username))
 	service.WriteAudit(nil, service.Int(user["id"]), service.Str(user["username"]), "LOGIN", "")
 	common.OKJSON(c, payload, "登录成功")
 }

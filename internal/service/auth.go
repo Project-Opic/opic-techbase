@@ -27,10 +27,20 @@ func VerifyPassword(raw string, hashed string) bool {
 	return checkPassword(raw, hashed)
 }
 
+// dummyBcryptHash 不存在用户时执行一次等价 bcrypt 校验,消除存在性时延侧信道。
+var dummyBcryptHash = HashPassword("opic-techbase-dummy")
+
 // Login 用户名密码登录(local 模式)。
 func Login(username, password string) (map[string]any, string) {
 	user, err := GetUserByUsername(username)
-	if err != nil || user == nil || !VerifyPassword(password, Str(user["password"])) {
+	if err != nil {
+		return nil, "用户名或密码错误"
+	}
+	if user == nil {
+		_ = VerifyPassword(password, dummyBcryptHash)
+		return nil, "用户名或密码错误"
+	}
+	if !VerifyPassword(password, Str(user["password"])) {
 		return nil, "用户名或密码错误"
 	}
 	if Int(user["status"]) != 1 {
@@ -230,6 +240,11 @@ func BuildLoginPayload(db *gorm.DB, user map[string]any) (map[string]any, error)
 
 // WriteAudit 写审计日志。
 func WriteAudit(db *gorm.DB, userID int64, username, action, detail string) {
+	// 与 audit_logs.username VARCHAR(50) 对齐:登录失败审计的用户名为调用方原样输入,
+	// 超长值会让整条 INSERT 失败(错误被忽略),从而绕过失败留痕。
+	if r := []rune(username); len(r) > 50 {
+		username = string(r[:50])
+	}
 	_, _ = store.Exec(db, `
 		INSERT INTO audit_logs (user_id, username, action, detail) VALUES (?, ?, ?, ?)`,
 		userID, username, action, detail)

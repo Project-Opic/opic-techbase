@@ -3,6 +3,7 @@
 package adminconsole
 
 import (
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -86,7 +87,7 @@ func AIAccountCreate(c *gin.Context) {
 	common.OKJSON(c, gin.H{"account": maskAccount(a)}, "账号已创建")
 }
 
-// AIAccountUpdate 更新账号（api_key 空=保留原值）。
+// AIAccountUpdate 更新账号（api_key 空=保留原值;变更端点须重新录入密钥）。
 func AIAccountUpdate(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -99,6 +100,11 @@ func AIAccountUpdate(c *gin.Context) {
 		return
 	}
 	b.norm()
+	old, err := llmcfg.GetAccountFull(id)
+	if err != nil || old == nil {
+		c.JSON(200, errcodeParam("账号不存在"))
+		return
+	}
 	a := &llmcfg.Account{
 		ID: id, Name: b.Name, Provider: b.Provider, BaseURL: b.BaseURL, APIKey: b.APIKey,
 		Models: b.Models, DefaultModel: b.DefaultModel, Temperature: b.Temperature,
@@ -106,12 +112,12 @@ func AIAccountUpdate(c *gin.Context) {
 	if b.Enabled != nil {
 		a.Enabled = *b.Enabled
 	} else {
-		old, err := llmcfg.GetAccountFull(id)
-		if err != nil || old == nil {
-			c.JSON(200, errcodeParam("账号不存在"))
-			return
-		}
 		a.Enabled = old.Enabled
+	}
+	// 端点(含提供商默认端点)变更须同时重新录入密钥:否则已存密钥会被静默转发到本次新指定的目的地
+	if b.APIKey == "" && (&llmcfg.Account{Provider: b.Provider, BaseURL: a.BaseURL}).ResolveBaseURL() != old.ResolveBaseURL() {
+		c.JSON(200, errcodeParam("变更 API 地址或提供商须同时重新填写密钥"))
+		return
 	}
 	if err := llmcfg.UpdateAccount(a); err != nil {
 		common.FailJSON(c, err)
@@ -155,22 +161,41 @@ func AIAccountTest(c *gin.Context) {
 }
 
 // AIUpstreamModels 获取上游可用模型目录。
-// 传 id → 用已存账号;否则用表单态 base_url/api_key(编辑中未保存也可获取)。
+// 传 id(GET) → 用已存账号自身登记的 base_url 与密钥;表单态(POST) → 用请求体中的 base_url/api_key。
+// 关键约束:已存密钥只能发往该账号自身记录的端点,绝不接受调用方另外指定的目的地;
+// 表单态密钥只允许走 POST 请求体,不得进 URL(查询串会落访问日志/代理记录)。
 func AIUpstreamModels(c *gin.Context) {
-	baseURL := strings.TrimSpace(c.Query("base_url"))
-	apiKey := c.Query("api_key")
+	var baseURL, apiKey string
 	if idStr := c.Query("id"); idStr != "" {
 		id, err := strconv.ParseInt(idStr, 10, 64)
-		if err == nil && id > 0 {
-			if a, _ := llmcfg.GetAccountFull(id); a != nil {
-				if baseURL == "" {
-					baseURL = a.ResolveBaseURL()
-				}
-				if apiKey == "" {
-					apiKey = a.APIKey
-				}
-			}
+		if err != nil || id <= 0 {
+			common.OKJSON(c, gin.H{"models": nil, "error": "id 无效"}, "")
+			return
 		}
+		a, err := llmcfg.GetAccountFull(id)
+		if err != nil || a == nil {
+			common.OKJSON(c, gin.H{"models": nil, "error": "账号不存在"}, "")
+			return
+		}
+		// 目的地与凭据同源:忽略 query 中的 base_url/api_key
+		baseURL, apiKey = a.ResolveBaseURL(), a.APIKey
+	} else if c.Request.Method == http.MethodPost {
+		var b struct {
+			BaseURL string `json:"base_url"`
+			APIKey  string `json:"api_key"`
+		}
+		if err := c.ShouldBindJSON(&b); err != nil {
+			common.OKJSON(c, gin.H{"models": nil, "error": "请求体无效"}, "")
+			return
+		}
+		baseURL, apiKey = strings.TrimSpace(b.BaseURL), b.APIKey
+	} else {
+		common.OKJSON(c, gin.H{"models": nil, "error": "缺少 id;表单态请用 POST 提交"}, "")
+		return
+	}
+	if err := llmcfg.CheckOutboundURL(baseURL); err != nil { // https/http + 解析后排除环回/链路本地/私网
+		common.OKJSON(c, gin.H{"models": nil, "error": err.Error()}, "")
+		return
 	}
 	ids, err := llmcfg.ListUpstreamModels(c.Request.Context(), baseURL, apiKey)
 	if err != nil {

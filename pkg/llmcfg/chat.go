@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -101,6 +103,33 @@ func ChatAccount(ctx context.Context, a *Account, model string, temperature floa
 		body["temperature"] = temperature
 	}
 	return postChat(ctx, base, key, body)
+}
+
+// CheckOutboundURL 出站目的地白名单:仅 http(s),主机解析后必须落在公网(排除 loopback /
+// link-local / private / 未指定地址),供 upstream-models 等携带已存密钥的出站请求共用。
+// 注:解析与拨号之间存在窗口(DNS rebinding),更强保证需在拨号层固定已解析地址。
+func CheckOutboundURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("API 地址未配置")
+	}
+	u, err := url.Parse(strings.TrimRight(raw, "/") + "/models")
+	if err != nil {
+		return fmt.Errorf("API 地址无效")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("仅支持 http/https")
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return fmt.Errorf("API 地址无法解析")
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsPrivate() || ip.IsUnspecified() {
+			return fmt.Errorf("API 地址不允许指向内部网络")
+		}
+	}
+	return nil
 }
 
 // ListUpstreamModels 拉取上游可用模型目录（GET /models,OpenAI 兼容）。

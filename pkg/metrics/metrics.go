@@ -66,9 +66,9 @@ func key(method, route string, status int) string {
 	return method + "|" + route + "|" + strconv.Itoa(status)
 }
 
-// IsHealthProbePath 健康探针路径(不计量、不打访问日志)。
+// IsHealthProbePath 健康探针与 /metrics 自身路径(不计量、不打访问日志)。
 func IsHealthProbePath(path string) bool {
-	return path == "/health" || path == "/health/live" || path == "/health/ready" || path == "/health/check"
+	return path == "/health" || path == "/health/live" || path == "/health/ready" || path == "/health/check" || path == "/metrics"
 }
 
 // Middleware 指标采集中间件(须最先注册)。
@@ -110,9 +110,13 @@ func Middleware() gin.HandlerFunc {
 	}
 }
 
-// Handler 输出 Prometheus 文本格式。
+// Handler 输出 Prometheus 文本格式(关闭态不输出任何运行时量,双保险)。
 func Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !enabled {
+			c.Data(http.StatusServiceUnavailable, "text/plain; charset=utf-8", nil)
+			return
+		}
 		var b strings.Builder
 		writeCounter := func(k string, v uint64) {
 			parts := strings.SplitN(k, "|", 3)

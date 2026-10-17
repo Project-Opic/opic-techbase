@@ -62,6 +62,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 未配置}
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       AUTH_MODE: ${AUTH_MODE:-local}
+      # 可信反代 CIDR(逗号分隔):经 Traefik 接入时必须设为 opic-net 网段,否则来源 IP 退化为网关地址
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       ZITADEL_ISSUER: ${ZITADEL_ISSUER:-}
       ZITADEL_CLIENT_ID: ${ZITADEL_CLIENT_ID:-}
       ZITADEL_CLIENT_SECRET: ${ZITADEL_CLIENT_SECRET:-}
